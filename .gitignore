@@ -1,0 +1,10 @@
+desktop.ini
+*.pyc
+assets/*
+experiment_evaluate/*
+experiment_evaluate_16000_bicubic_only/*
+experiment_evaluate_34000/*
+logs/*
+temp_inputs/*
+temp_results/*
+weights/*
