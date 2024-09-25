@@ -72,7 +72,7 @@ class RealESRGANDataset(data.Dataset):
                 videos_path = readline_txt(current_txt)
                 print(f"loading dataset: {current_txt}")
                 for ii, video_path in enumerate(videos_path):
-                    print(f"{ii}/{len(videos_path)}")
+                    #print(f"{ii}/{len(videos_path)}")
                     video_path = f'{root_path}/{video_path}'
                     self.paths_idx_to_key[len(self.paths)] = video_path
                     self.paths.append(readline_txt(video_path)) # list of list, each list with one video frames

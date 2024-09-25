@@ -91,8 +91,8 @@ def create_dataset(dataset_config):
     elif dataset_config['type'] == 'txt':
         dataset = BaseDataTxt(**dataset_config['params'])
     elif dataset_config['type'] == 'realesrgan':
-        #dataset = RealESRGANDataset(dataset_config['params'])
-        dataset = tempoSpatialEval_ExperimentsData(dataset_config['params'])
+        dataset = RealESRGANDataset(dataset_config['params'])
+        #dataset = tempoSpatialEval_ExperimentsData(dataset_config['params'])
     else:
         raise NotImplementedError(dataset_config['type'])
 

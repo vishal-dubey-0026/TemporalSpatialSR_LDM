@@ -1469,14 +1469,24 @@ class TrainerDistillDifIR(TrainerDifIR):
 
             indices = [int(self.base_diffusion.num_timesteps * x) for x in [0.25, 0.5, 0.75, 1]]
             batch_size = self.configs.train.batch[1]
+            if phase == 'expr':
+                batch_size = self.configs.experiment_evaluate.batch
             num_iters_epoch = math.ceil(len(self.datasets[phase]) / batch_size)
             mean_psnr = mean_lpips = mean_musiq = mean_clipiqa = mean_ssim =  0
+            mean_psnr_baseline = mean_ssim_baseline = mean_lpips_baseline = 0
             for ii, data in enumerate(self.dataloaders[phase]):
-                data = self.prepare_data(data, realesrgan = True, phase='val')
+                if phase != 'expr':
+                    data = self.prepare_data(data, realesrgan = False, phase='val')
+                else:
+                    data = self.prepare_data(data, realesrgan = True, phase=phase)
+                    #data = self.prepare_data(data, realesrgan = False, phase=phase)
                 if 'gt' in data:
                     im_lq, im_gt = data['lq'], data['gt']
                 else:
                     im_lq = data['lq']
+                if self.configs.train.test_baseline:
+                    ori_h, ori_w = im_gt.shape[2], im_gt.shape[3] # BCHW
+                    im_baseline = F.interpolate(im_lq.clone(), size=(ori_h, ori_w), mode='bicubic') # [-1 to 1]
 
                 model_kwargs={'lq':im_lq,} if self.configs.model.params.cond_lq else None
                 
@@ -1491,6 +1501,11 @@ class TrainerDistillDifIR(TrainerDifIR):
                     progress=False,
                     one_step=True
                     ) 
+                if phase == 'expr':
+                    results[:, :, :, :] = results[:, 1:2, :, :]
+                if phase == 'expr':
+                    im_gt[:, :, :, :] = im_gt[:, 1:2, :, :]
+                    im_baseline[:, :, :, :] = im_baseline[:, 1:2, :, :]
                 
                 if 'gt' in data:
                     mean_psnr += util_image.batch_PSNR(
@@ -1504,6 +1519,19 @@ class TrainerDistillDifIR(TrainerDifIR):
                             ycbcr=False, ###True
                             )
                     mean_lpips += self.lpips_loss(results.detach(), im_gt).sum().item()
+
+                    if self.configs.train.test_baseline:
+                        mean_psnr_baseline += util_image.batch_PSNR(
+                            im_baseline * 0.5 + 0.5,
+                            im_gt * 0.5 + 0.5,
+                            ycbcr=False, ###True,
+                            )
+                        mean_ssim_baseline += util_image.batch_SSIM(
+                                im_baseline * 0.5 + 0.5,
+                                im_gt * 0.5 + 0.5,
+                                ycbcr=False, ###True,
+                                )
+                        mean_lpips_baseline += self.lpips_loss(im_baseline, im_gt).sum().item()
                 with torch.no_grad():
                     pass
                     ###mean_clipiqa += self.metric_dict["clipiqa"](results.detach() * 0.5 + 0.5).sum().item()
@@ -1518,7 +1546,8 @@ class TrainerDistillDifIR(TrainerDifIR):
                                x2.cpu().permute(1,2,0).numpy(),
                                self.image_dir / phase / f"predict_x_{self.log_step_img[phase]:05d}.png",
                                )
-                    
+                    if phase == 'expr':
+                        im_lq[:, :, :, :] = im_lq[:, 1:2, :, :]
                     x3 = vutils.make_grid(im_lq, normalize=True)
                     # self.writer.add_image('Validation LQ Image', x3, self.log_step_img[phase])
                     if self.configs.train.save_images:
@@ -1534,6 +1563,18 @@ class TrainerDistillDifIR(TrainerDifIR):
                                    x4.cpu().permute(1,2,0).numpy(),
                                    self.image_dir / phase / f"hq_{self.log_step_img[phase]:05d}.png",
                                    )
+                            if self.configs.train.test_baseline:
+                                temp_baseline = vutils.make_grid(im_baseline, normalize=True)
+                                util_image.imwrite(
+                                   temp_baseline.cpu().permute(1,2,0).numpy(),
+                                   self.image_dir / phase / f"baseline_{self.log_step_img[phase]:05d}.png",
+                                   )
+                    if self.configs.train.save_images and phase == 'expr':
+                        im_sr_model = vutils.make_grid(sample_decode['sample'].detach(), normalize=True)
+                        util_image.imwrite(
+                               im_sr_model.cpu().permute(1,2,0).numpy(),
+                               self.image_dir / phase / f"sr_{self.log_step_img[phase]:05d}.png",
+                               )
                     self.log_step_img[phase] += 1
                     
             mean_clipiqa /= len(self.datasets[phase])
@@ -1546,6 +1587,12 @@ class TrainerDistillDifIR(TrainerDifIR):
                 self.logger.info(f'Validation Metric: PSNR={mean_psnr:5.2f}, LPIPS={mean_lpips:6.4f}, SSIM={mean_ssim:6.4f}...')
                 # self.writer.add_scalar('Validation PSNR', mean_psnr, self.log_step[phase])
                 # self.writer.add_scalar('Validation LPIPS', mean_lpips, self.log_step[phase])
+                if self.configs.train.test_baseline:
+                    mean_psnr_baseline /= len(self.datasets[phase])
+                    mean_lpips_baseline /= len(self.datasets[phase])
+                    mean_ssim_baseline /= len(self.datasets[phase])
+                    self.logger.info(f'Validation Metric of Baseline: PSNR={mean_psnr_baseline:5.2f}, LPIPS={mean_lpips_baseline:6.4f}, SSIM={mean_ssim_baseline:6.4f}...')
+                
                 self.log_step[phase] += 1
 
             self.logger.info("="*100)

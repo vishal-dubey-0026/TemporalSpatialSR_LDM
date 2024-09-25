@@ -51,7 +51,7 @@ if __name__ == "__main__":
         if key in ['cfg_path', 'save_dir', 'resume', ]:
             configs[key] = getattr(args, key)
 
-    ###trainer = TrainerDistill(configs)
-    trainer = TrainerTeacher(configs)
-    #trainer.train()
-    trainer.experiment_evaluate()
+    trainer = TrainerDistill(configs)
+    #trainer = TrainerTeacher(configs)
+    trainer.train()
+    #trainer.experiment_evaluate()

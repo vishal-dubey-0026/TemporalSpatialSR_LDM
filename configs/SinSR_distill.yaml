@@ -1,7 +1,7 @@
 model:
   target: models.unet.UNetModelSwin
-  ckpt_path:  weights/resshift_realsrx4_s15_v1.pth
-  teacher_ckpt_path: weights/resshift_realsrx4_s15_v1.pth
+  ckpt_path:  logs/SinSR/2024-09-17-05-49/ckpts/model_37500.pth
+  teacher_ckpt_path: logs/SinSR/2024-09-17-05-49/ema_ckpts/ema_model_37500.pth
   params:
     image_size: 64
     in_channels: 6
@@ -156,9 +156,9 @@ train:
   # xT_cov_loss: 0.1
 
   lr: 5e-5
-  batch: [176, 8] #[384, 8] #[64, 8]  #batchsize for training and validation
+  batch: [64, 8] #[384, 8] #[64, 8]  #batchsize for training and validation
   use_fp16: False
-  microbatch: 44 #64 # 16
+  microbatch: 16 #64 # 16
   seed: 123456
   global_seeding: False
   prefetch_factor: 2 #4
@@ -167,11 +167,11 @@ train:
   iterations: 500000
   milestones: [1000, 50000] ###[5000, 500000]
   weight_decay: 0
-  save_freq: 1000 #2000 # model(s) save freq.
+  save_freq: 2000 # model(s) save freq.
   # val_freq:  10000
   # log_freq: [1000, 5000, 1] #[training loss, training images, val images]
-  val_freq:  1000 #2000
-  log_freq: [10, 5000, 5] #[training loss, training images, val images]
+  val_freq:  2000 #2000
+  log_freq: [10, 50000, 5] #[training loss, training images, val images]
   save_images: True  # save the images of tensorboard logging
   use_ema_val: True
   test_baseline: True
