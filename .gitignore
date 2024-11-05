@@ -8,3 +8,6 @@ logs/*
 temp_inputs/*
 temp_results/*
 weights/*
+experiment_evaluate_SurgT_esrgan/*
+experiment_evaluate_cardiac_bowl_3d_esrgan/*
+experiment_evaluate_degradation_esrgan_on_realesrgan*

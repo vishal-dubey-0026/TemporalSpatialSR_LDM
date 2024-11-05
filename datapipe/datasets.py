@@ -6,7 +6,9 @@ import cv2
 import torch
 from functools import partial
 import torchvision as thv
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, IterableDataset
+import torch.utils.data as udata
+
 from albumentations import SmallestMaxSize
 
 from utils import util_sisr
@@ -15,6 +17,9 @@ from utils import util_common
 
 from basicsr.data.transforms import augment
 from basicsr.data.realesrgan_dataset import RealESRGANDataset
+from basicsr.data.realesrgan_SurgT_dataset import RealESRGANSurgTDataset
+from basicsr.data.realesrgan_dataset_cardiacbowl_3d import RealESRGANDataset_3d
+
 from .ffhq_degradation_dataset import FFHQDegradationDataset
 from .degradation_bsrgan.bsrgan_light import degradation_bsrgan_variant, degradation_bsrgan
 
@@ -23,6 +28,8 @@ from basicsr.utils import img2tensor
 import os
 import glob
 import math
+from SurgT_process import Video as Video_Struct
+
 
 
 
@@ -84,6 +91,11 @@ def create_dataset(dataset_config):
         dataset = BicubicData(**dataset_config['params'])
     elif dataset_config['type'] == 'tempoSpatial':
         dataset = tempoSpatialEval_BicubicData(dataset_config['params'])
+    elif dataset_config['type'] == 'tempoSpatial_SurgT':
+        dataset = tempoSpatialEval_BicubicData_SurgT(dataset_config['params'])
+    elif dataset_config['type'] == 'tempoSpatial_cardiac_bowl_3d':
+        dataset = tempoSpatialEval_ExperimentsData_CardiacBowl_3d(dataset_config['params'])
+        
     elif dataset_config['type'] == 'bsrgan':
         dataset = BSRGANLightDeg(**dataset_config['params'])
     elif dataset_config['type'] == 'bsrganimagenet':
@@ -93,6 +105,15 @@ def create_dataset(dataset_config):
     elif dataset_config['type'] == 'realesrgan':
         dataset = RealESRGANDataset(dataset_config['params'])
         #dataset = tempoSpatialEval_ExperimentsData(dataset_config['params'])
+        
+    elif dataset_config['type'] == 'realesrgan_SurgT':
+        #dataset = RealESRGANSurgTDataset(dataset_config['params'])
+        dataset = tempoSpatialEval_BicubicData_SurgT(dataset_config['params'], mode = 'expr', vid_to_test = 100)
+    elif dataset_config['type'] == 'realesrgan_cardiac_bowl_3d':
+        #dataset = RealESRGANDataset_3d(dataset_config['params'])
+        dataset = tempoSpatialEval_ExperimentsData_CardiacBowl_3d(dataset_config['params'], mode = 'expr', pat_to_test = 205)
+    elif dataset_config['type'] == 'realesrgan_master_3d':
+        dataset = RealESRGANMasterDataset_3d(dataset_config['params'])
     else:
         raise NotImplementedError(dataset_config['type'])
 
@@ -490,7 +511,7 @@ class tempoSpatialEval_BicubicData(Dataset):
         if h < self.gt_size or w < self.gt_size:
             pad_h = max(0, self.gt_size - h)
             pad_w = max(0, self.gt_size - w)
-            im_gt = cv2.copyMakeBorder(im_gt_6ch, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
+            im_gt_6ch = cv2.copyMakeBorder(im_gt_6ch, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
 
         if self.rescale_gt:
             im_gt_6ch = self.smallest_rescaler(image=im_gt_6ch)['image']
@@ -513,7 +534,6 @@ class tempoSpatialEval_BicubicData(Dataset):
         out = {'lq':self.transform(im_lq), 'gt':self.transform(im_gt_golden)} # [0, 1] to [-1, 1]
 
         return out
-
 
 class tempoSpatialEval_ExperimentsData(Dataset):
     def __init__(
@@ -654,3 +674,520 @@ class tempoSpatialEval_ExperimentsData(Dataset):
         out = {'gt': im_gt_6ch, 'kernel1': kernel, 'sinc_kernel': sinc_kernel} # [0, 1]
 
         return out
+
+
+class tempoSpatialEval_ExperimentsData_CardiacBowl_3d(Dataset):
+    def __init__(
+            self,
+            opt,
+            mode = 'val',
+            pat_to_test = 1,
+            max_batch_size = 16,
+            dataset_path = f"second-annual-data-science-bowl-v2/validate/validate",
+            
+            ):
+        
+        
+        
+        self.opt = opt
+        self.max_batch_size = max_batch_size
+        self.root_path = self.opt['root_path']
+        self.mode = mode
+        self.paths = [] #self.max_batch_size * number_of_pat
+
+        self.temporal_SR = 8
+        self.temp_frame_count = 30
+        self.num_adj_slice = 1
+        self.num_slices = 2*self.num_adj_slice + 1
+        self.interp_frames = self.temporal_SR - 1 # 7
+        self.chunks_in_video = self.temp_frame_count // self.temporal_SR # 3
+        self.samples_in_video = self.chunks_in_video * self.interp_frames # 21
+
+        if self.mode == 'expr':
+            self.dataset_path = f"{self.root_path}/{dataset_path}"
+            self.dataset = RealESRGANDataset_3d(opt = opt, mode = 'training')
+            self.num_adj_slice = self.dataset.num_adj_slice
+            self.num_slices = self.dataset.num_slices
+            patients_name = sorted(os.listdir(self.dataset_path))
+            pat_to_test = min(pat_to_test, len(patients_name))
+            patients_name = patients_name[:pat_to_test]
+            for pat_name in patients_name:
+                print(f"{pat_name}")
+                pat_folder = f"{self.dataset_path}/{pat_name}"
+                slices_name = sorted([name for name in os.listdir(f"{pat_folder}/study") if "sax_" in name], key=lambda x: int(x.split("_")[-1]))
+                if len(slices_name) < self.num_slices: continue
+                for slice_idx, slice_name in enumerate(slices_name):
+                    if (slice_idx == 0) or (slice_idx == len(slices_name) - 1): continue
+                    if "sax_" not in slice_name: continue
+                    slice_time_li = []
+                    for adj_t in range(-self.num_adj_slice, self.num_adj_slice + 1):
+
+                        slice_folder = f"{pat_folder}/study/{slices_name[slice_idx + adj_t]}"
+                        slice_time_li.append(sorted(glob.glob(f"{slice_folder}/*.dcm")))
+                        if len(slice_time_li[-1]) != self.temp_frame_count: 
+                            slice_time_li.pop()
+                            break
+                    if len(slice_time_li) != self.num_slices: continue
+                    zipped_slice_time_li = []
+                    for time_idx in range(len(slice_time_li[0])):
+                        slice_time_li[0][time_idx] = slice_time_li[0][time_idx].replace(f"{self.root_path}/",f"")
+                        slice_time_li[1][time_idx] = slice_time_li[1][time_idx].replace(f"{self.root_path}/",f"")
+                        slice_time_li[2][time_idx] = slice_time_li[2][time_idx].replace(f"{self.root_path}/",f"")
+                        zipped_slice_time_li.append(f"{slice_time_li[0][time_idx]}\t{slice_time_li[1][time_idx]}\t{slice_time_li[2][time_idx]}")
+
+                    #zipped_slice_time_li = list(zip(slice_time_li[0], slice_time_li[1], slice_time_li[2]))
+                    self.paths.append(zipped_slice_time_li)
+        elif self.mode == 'val':
+            self.dataset = RealESRGANDataset_3d(opt = opt, mode = 'testing')
+            self.paths = self.dataset.paths
+            self.paths_idx_to_key = self.dataset.paths_idx_to_key
+            self.sf = opt['sf']
+            self.resize_back = opt['resize_back']
+            self.gt_size = opt['gt_size']
+            self.matlab_mode = opt['matlab_mode']
+            self.transform_type = opt['transform_type']
+            self.transform_kwargs = opt['transform_kwargs']
+
+            self.transform = get_transforms(self.transform_type, self.transform_kwargs)
+
+        
+        
+        
+        
+        
+        self.total_sample_count = self.samples_in_video * len(self.paths)
+
+       
+        self.rescale_gt = opt['rescale_gt']
+        self.gt_size = opt['gt_size']
+
+        
+        if self.rescale_gt:
+            self.smallest_rescaler = SmallestMaxSize(max_size=self.gt_size)
+
+
+    def get_degradation_kernels(self, ):
+         # ------------------------ Generate kernels (used in the first degradation) ------------------------ #
+        kernel_size = random.choice(self.dataset.kernel_range1)
+        if np.random.uniform() < self.dataset.opt['sinc_prob']:
+            # this sinc filter setting is for kernels ranging from [7, 21]
+            if kernel_size < 13:
+                omega_c = np.random.uniform(np.pi / 3, np.pi)
+            else:
+                omega_c = np.random.uniform(np.pi / 5, np.pi)
+            kernel = circular_lowpass_kernel(omega_c, kernel_size, pad_to=False)
+        else:
+            kernel = random_mixed_kernels(
+                self.dataset.kernel_list,
+                self.dataset.kernel_prob,
+                kernel_size,
+                self.dataset.blur_sigma,
+                self.dataset.blur_sigma, [-math.pi, math.pi],
+                self.dataset.betag_range,
+                self.dataset.betap_range,
+                noise_range=None)
+        # pad kernel
+        pad_size = (self.dataset.blur_kernel_size - kernel_size) // 2
+        kernel = np.pad(kernel, ((pad_size, pad_size), (pad_size, pad_size)))
+
+
+         # ------------------------------------- the final sinc kernel ------------------------------------- #
+        if np.random.uniform() < self.dataset.opt['final_sinc_prob']:
+            kernel_size = random.choice(self.dataset.kernel_range2)
+            omega_c = np.random.uniform(np.pi / 3, np.pi)
+            sinc_kernel = circular_lowpass_kernel(omega_c, kernel_size, pad_to=self.dataset.blur_kernel_size2)
+            sinc_kernel = torch.FloatTensor(sinc_kernel)
+        else:
+            sinc_kernel = self.dataset.pulse_tensor
+        kernel = torch.FloatTensor(kernel)
+
+        return kernel, sinc_kernel
+
+
+    def __len__(self):
+        return int(self.total_sample_count)
+
+    
+
+    def __getitem__(self, index):
+        #im_gt = util_image.imread(im_path, chn='rgb', dtype='float32')
+        video_idx = index // self.samples_in_video
+        video_path = self.paths[video_idx]
+        assert len(video_path) == self.temp_frame_count, f"It has {len(video_path)}, but expecting {self.temp_frame_count}"
+        frame_id = index % self.samples_in_video
+        frame_bucket_id = frame_id // self.interp_frames
+        start_time_step = (frame_bucket_id * self.interp_frames) + frame_bucket_id
+        end_time_step = start_time_step + self.temporal_SR
+        mid_time_idx = (frame_id % self.interp_frames) + 1
+        mid_frame_idx = start_time_step + mid_time_idx
+        root_path = self.root_path
+
+        start_path, end_path = (video_path[start_time_step], video_path[end_time_step])
+        start_path = start_path.split('\t'); end_path = end_path.split('\t')
+        
+        interp_image, GT_image = [None] * self.num_slices, [None] * self.num_slices
+        for i in range(self.num_slices):
+            start_frame, end_frame = self.dataset.read_scale_dcm(f"{root_path}/{start_path[i]}"), self.dataset.read_scale_dcm(f"{root_path}/{end_path[i]}")
+
+            if (start_time_step + 1) == mid_frame_idx: 
+                interp_frames = self.dataset.interpolate_frames(frame1 = start_frame, frame2 = end_frame, time_idxs = [mid_time_idx, mid_time_idx+1], num_interpolations = self.temporal_SR - 1)
+                interp_frames = [start_frame.copy()] + interp_frames
+                left = start_frame
+                mid = self.dataset.read_scale_dcm(f'{root_path}/' + video_path[mid_frame_idx].split('\t')[i]) 
+                right = self.dataset.read_scale_dcm(f'{root_path}/' + video_path[mid_frame_idx + 1].split('\t')[i]) 
+            elif (end_time_step - 1) == mid_frame_idx:
+                interp_frames = self.dataset.interpolate_frames(frame1 = start_frame, frame2 = end_frame, time_idxs = [mid_time_idx-1, mid_time_idx], num_interpolations = self.temporal_SR - 1)
+                interp_frames = interp_frames + [end_frame.copy()]
+                left = self.dataset.read_scale_dcm(f'{root_path}/' + video_path[mid_frame_idx - 1].split('\t')[i]) 
+                mid = self.dataset.read_scale_dcm(f'{root_path}/' + video_path[mid_frame_idx].split('\t')[i]) 
+                right = end_frame
+            else:
+                interp_frames = self.dataset.interpolate_frames(frame1 = start_frame, frame2 = end_frame, time_idxs = [mid_time_idx-1, mid_time_idx, mid_time_idx+1], num_interpolations = self.temporal_SR - 1)
+                left = self.dataset.read_scale_dcm(f'{root_path}/' + video_path[mid_frame_idx - 1].split('\t')[i]) 
+                mid = self.dataset.read_scale_dcm(f'{root_path}/' + video_path[mid_frame_idx].split('\t')[i]) 
+                right = self.dataset.read_scale_dcm(f'{root_path}/' + video_path[mid_frame_idx + 1].split('\t')[i]) 
+                
+            interp_image[i] = np.stack(interp_frames, axis = -1) # use this as spaital GT, apply spatial SR on this image, spatially degrade this GT
+            GT_image[i] = np.stack([left, mid, right], axis = -1) # use this for final loss calculation as GT, model should output this as GT
+            
+        interp_image = np.concatenate(interp_image, axis = -1) # HxWxC with C = 9
+        GT_image = GT_image[1] # HxWxC with C = 3
+        im_gt_12ch = np.concatenate([interp_image, GT_image], axis = -1)  # HxWxC with C = 12
+        im_gt_12ch = (im_gt_12ch.astype(np.float32) / 255).clip(0.0, 1.0) # [0 - 1]
+        if self.mode == 'expr':
+            # BGR to RGB, HWC to CHW, numpy to tensor
+            im_gt_12ch = img2tensor([im_gt_12ch], bgr2rgb=False, float32=True)[0] #CxHxW with C = 12 [0 - 1]
+            kernel, sinc_kernel = self.get_degradation_kernels()
+            out = {'gt': im_gt_12ch, 'kernel1': kernel, 'sinc_kernel': sinc_kernel} # [0, 1]
+        elif self.mode == 'val':
+            h, w = im_gt_12ch.shape[:2]
+            if h < self.gt_size or w < self.gt_size:
+                pad_h = max(0, self.gt_size - h)
+                pad_w = max(0, self.gt_size - w)
+                im_gt_12ch = cv2.copyMakeBorder(im_gt_12ch, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
+
+            if self.rescale_gt:
+                im_gt_12ch = self.smallest_rescaler(image=im_gt_12ch)['image']
+
+            im_gt_12ch = util_image.random_crop(im_gt_12ch, self.gt_size)
+            im_gt, im_gt_golden = im_gt_12ch[:, :, 0:9], im_gt_12ch[:, :, 9:12]
+
+            # imresize
+            if self.matlab_mode:
+                im_lq = util_image.imresize_np(im_gt, scale=1/self.sf)
+            else:
+                im_lq = cv2.resize(im_gt, dsize=None, fx=1/self.sf, fy=1/self.sf, interpolation=cv2.INTER_CUBIC)
+            if self.resize_back:
+                if self.matlab_mode:
+                    im_lq = util_image.imresize_np(im_gt, scale=self.sf)
+                else:
+                    im_lq = cv2.resize(im_lq, dsize=None, fx=self.sf, fy=self.sf, interpolation=cv2.INTER_CUBIC)
+            im_lq = np.clip(im_lq, 0.0, 1.0)
+
+            out = {'lq':self.transform(im_lq), 'gt':self.transform(im_gt_golden)} # [0, 1] to [-1, 1]
+
+
+        return out
+
+class tempoSpatialEval_BicubicData_SurgT(Dataset):
+    def __init__(
+            self,
+            opt,
+            mode = 'val',
+            vid_to_test = 1,
+            dataset_path = 'SurgT/data_testset',
+            
+            ):
+        
+        
+        
+        self.opt = opt
+        self.mode = mode
+        self.vid_to_test = vid_to_test
+        self.cache_buffer = {}
+        if self.mode == 'expr':
+            self.root_path = self.opt['root_path']
+            self.dataset_path = f"{self.root_path}/{dataset_path}"
+            videos_path =  glob.glob(f'{self.dataset_path}/train/case_*') #glob.glob(f'{self.dataset_path}/train/case_*') + glob.glob(f'{self.dataset_path}/test/case_*') + glob.glob(f'{self.dataset_path}/validation/case_*') # [f'{self.dataset_path}/case_1']
+            videos_path = sorted(videos_path)
+            self.dataset = RealESRGANSurgTDataset(opt = opt, mode = 'training')
+            self.paths = []
+            self.paths_idx_to_key = {}
+            for ii, case_path in enumerate(videos_path):
+                print(f"{ii}/{len(videos_path)}")
+                for video_name in sorted(os.listdir(case_path)):
+                    video_path = f'{case_path}/{video_name}'
+                    print(f"video path is: {video_path}")
+
+                    self.paths_idx_to_key[len(self.paths)] = video_path
+                    self.paths.append(Video_Struct(video_path)) # list of list, each list with one video frames
+        elif self.mode == 'val':
+            self.dataset = RealESRGANSurgTDataset(opt = opt, mode = 'testing')
+            self.paths = self.dataset.paths
+            self.paths_idx_to_key = self.dataset.paths_idx_to_key
+            self.sf = opt['sf']
+            self.resize_back = opt['resize_back']
+            self.matlab_mode = opt['matlab_mode']
+            self.transform_type = opt['transform_type']
+            self.transform_kwargs = opt['transform_kwargs']
+
+            self.transform = get_transforms(self.transform_type, self.transform_kwargs)
+        
+        
+        self.vid_to_test = min(self.vid_to_test, len(self.paths))
+        self.paths = self.paths[:self.vid_to_test]
+        self.frame_idx_to_paths_idx = {}
+        self.temporal_SR = 8
+        self.interp_frames = self.temporal_SR - 1 # 7
+        self.samples_in_video, self.total_sample_count = 0, 0
+        for video_id, video_struct in enumerate(self.paths):
+            
+            temp_frame_count = self.adhoc_get_total_frames(video_struct) # frames in video
+            assert temp_frame_count > self.temporal_SR, f"{self.paths_idx_to_key[video_id]} has {temp_frame_count}, but expecting more than {self.temporal_SR} frames"
+
+            self.chunks_in_video = temp_frame_count // self.temporal_SR # 3/chunks, make sure more than 8 frames in video
+            if (temp_frame_count % self.temporal_SR) == 0:
+                self.chunks_in_video -= 1
+            self.samples_in_video = self.chunks_in_video * self.interp_frames # 21/#buffers to interpolate
+
+            for frame_id in range(self.samples_in_video):
+                self.frame_idx_to_paths_idx[frame_id + self.total_sample_count] = (video_id, self.total_sample_count) # overall_idx -> (video_id, start_frame_idx of video_id)
+            self.total_sample_count += self.samples_in_video #* len(self.paths)
+
+        
+        self.rescale_gt = opt['rescale_gt']
+        self.gt_size = opt['gt_size']
+        
+        if self.rescale_gt:
+            self.smallest_rescaler = SmallestMaxSize(max_size=self.gt_size)
+
+    def adhoc_get_total_frames(self, video_struct):
+        cap = cv2.VideoCapture(video_struct.video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        return total_frames
+
+    def __len__(self):
+        return int(self.total_sample_count)
+
+    def get_degradation_kernels(self, ):
+         # ------------------------ Generate kernels (used in the first degradation) ------------------------ #
+        kernel_size = random.choice(self.dataset.kernel_range1)
+        if np.random.uniform() < self.dataset.opt['sinc_prob']:
+            # this sinc filter setting is for kernels ranging from [7, 21]
+            if kernel_size < 13:
+                omega_c = np.random.uniform(np.pi / 3, np.pi)
+            else:
+                omega_c = np.random.uniform(np.pi / 5, np.pi)
+            kernel = circular_lowpass_kernel(omega_c, kernel_size, pad_to=False)
+        else:
+            kernel = random_mixed_kernels(
+                self.dataset.kernel_list,
+                self.dataset.kernel_prob,
+                kernel_size,
+                self.dataset.blur_sigma,
+                self.dataset.blur_sigma, [-math.pi, math.pi],
+                self.dataset.betag_range,
+                self.dataset.betap_range,
+                noise_range=None)
+        # pad kernel
+        pad_size = (self.dataset.blur_kernel_size - kernel_size) // 2
+        kernel = np.pad(kernel, ((pad_size, pad_size), (pad_size, pad_size)))
+
+
+         # ------------------------------------- the final sinc kernel ------------------------------------- #
+        if np.random.uniform() < self.dataset.opt['final_sinc_prob']:
+            kernel_size = random.choice(self.dataset.kernel_range2)
+            omega_c = np.random.uniform(np.pi / 3, np.pi)
+            sinc_kernel = circular_lowpass_kernel(omega_c, kernel_size, pad_to=self.dataset.blur_kernel_size2)
+            sinc_kernel = torch.FloatTensor(sinc_kernel)
+        else:
+            sinc_kernel = self.dataset.pulse_tensor
+        kernel = torch.FloatTensor(kernel)
+
+        return kernel, sinc_kernel
+
+    def idx_get_frame(self, video_struct, frame_idx):
+        
+        if not video_struct.cap.isOpened():
+            print(f"Error: Could not open video {video_struct.video_path}.")
+            exit()
+        if False:
+            video_struct.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            frame = video_struct.get_frame()
+            
+        else:
+            key = video_struct.case_sample_path
+            frame = cv2.imread(f"{key}/frames/{(frame_idx+1):05d}.png") # because ffmpeg extracts frame with start index = 1, and not 0
+            '''
+            if not (key in self.cache_buffer):
+                for key in self.cache_buffer: del self.cache_buffer[key]
+                self.cache_buffer[key] = []
+                temp_frame_count = self.adhoc_get_total_frames(video_struct)
+                while video_struct.frame_counter < temp_frame_count:
+                    self.cache_buffer[key].append(video_struct.get_frame())
+            frame = self.cache_buffer[key][frame_idx]   
+            ''' 
+        
+        if frame is None:
+            print(f"Error: could not get frame at index: {frame_idx} for video:{video_struct.video_path}")
+            exit()
+        return frame
+
+    def __getitem__(self, index):
+        #im_gt = util_image.imread(im_path, chn='rgb', dtype='float32')
+        video_id, start_frame_idx = self.frame_idx_to_paths_idx[index]
+        video_struct = self.paths[video_id]
+        if video_struct.cap is None:
+            video_struct.video_restart()
+        frame_id = index - start_frame_idx
+        #frame_id = index % self.samples_in_video
+        frame_bucket_id = frame_id // self.interp_frames
+        start_time_step = (frame_bucket_id * self.interp_frames) + frame_bucket_id
+        end_time_step = start_time_step + self.temporal_SR
+        mid_time_idx = (frame_id % self.interp_frames) + 1
+        mid_frame_idx = start_time_step + mid_time_idx
+        start_frame = self.idx_get_frame(video_struct, start_time_step)
+        end_frame = self.idx_get_frame(video_struct, end_time_step)
+
+        is_first_split = 0
+        start_frame = video_struct.split_frame(start_frame)[is_first_split]
+        end_frame = video_struct.split_frame(end_frame)[is_first_split]
+            
+           
+
+        start_frame, end_frame = self.dataset.scale_img(start_frame), self.dataset.scale_img(end_frame)
+
+        if (start_time_step + 1) == mid_frame_idx: 
+            interp_frames = self.dataset.interpolate_frames(frame1 = start_frame, frame2 = end_frame, time_idxs = [mid_time_idx, mid_time_idx+1], num_interpolations = self.temporal_SR - 1)
+            interp_frames = [start_frame.copy()] + interp_frames
+            left = start_frame
+            mid = self.idx_get_frame(video_struct, mid_frame_idx); mid = video_struct.split_frame(mid)[is_first_split]; mid = self.dataset.scale_img(mid)
+            right = self.idx_get_frame(video_struct, mid_frame_idx + 1); right = video_struct.split_frame(right)[is_first_split]; right = self.dataset.scale_img(right)
+
+        elif (end_time_step - 1) == mid_frame_idx:
+            interp_frames = self.dataset.interpolate_frames(frame1 = start_frame, frame2 = end_frame, time_idxs = [mid_time_idx-1, mid_time_idx], num_interpolations = self.temporal_SR - 1)
+            interp_frames = interp_frames + [end_frame.copy()]
+            left = self.idx_get_frame(video_struct, mid_frame_idx - 1); left = video_struct.split_frame(left)[is_first_split]; left = self.dataset.scale_img(left)
+            mid = self.idx_get_frame(video_struct, mid_frame_idx); mid = video_struct.split_frame(mid)[is_first_split]; mid = self.dataset.scale_img(mid)
+
+            right = end_frame
+        else:
+            interp_frames = self.dataset.interpolate_frames(frame1 = start_frame, frame2 = end_frame, time_idxs = [mid_time_idx-1, mid_time_idx, mid_time_idx+1], num_interpolations = self.temporal_SR - 1)
+            left = self.idx_get_frame(video_struct, mid_frame_idx - 1); left = video_struct.split_frame(left)[is_first_split]; left = self.dataset.scale_img(left)
+            mid = self.idx_get_frame(video_struct, mid_frame_idx); mid = video_struct.split_frame(mid)[is_first_split]; mid = self.dataset.scale_img(mid)
+            right = self.idx_get_frame(video_struct, mid_frame_idx + 1); right = video_struct.split_frame(right)[is_first_split]; right = self.dataset.scale_img(right)
+
+           
+        ############################
+        interp_image = np.concatenate(interp_frames, axis = -1) # HxWxC with C = 9, use this as spaital GT, apply spatial SR on this image, spatially degrade this GT
+        GT_image = mid # use this for final loss calculation as GT, model should output this as GT
+        
+        img_gt_12ch = np.concatenate([interp_image, GT_image], axis = -1)  # HxWxC with C = 12
+        img_gt_12ch = img_gt_12ch.astype(np.float32) / 255 #[0 - 1]
+        #############################  
+        if self.mode == 'expr':
+            # BGR to RGB, HWC to CHW, numpy to tensor
+            img_gt_12ch = img2tensor([img_gt_12ch], bgr2rgb=False, float32=True)[0] #CxHxW with C = 6 [0 - 1]
+            kernel, sinc_kernel = self.get_degradation_kernels()
+            out = {'gt': img_gt_12ch, 'kernel1': kernel, 'sinc_kernel': sinc_kernel} # [0, 1]
+
+          
+        elif self.mode == 'val':
+       
+            h, w = img_gt_12ch.shape[:2]
+            if h < self.gt_size or w < self.gt_size:
+                pad_h = max(0, self.gt_size - h)
+                pad_w = max(0, self.gt_size - w)
+                img_gt_12ch = cv2.copyMakeBorder(img_gt_12ch, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
+
+            if self.rescale_gt:
+                img_gt_12ch = self.smallest_rescaler(image=img_gt_12ch)['image']
+
+            img_gt_12ch = util_image.random_crop(img_gt_12ch, self.gt_size)
+            im_gt, im_gt_golden = img_gt_12ch[:, :, 0:9], img_gt_12ch[:, :, 9:12]
+
+            # imresize
+            if self.matlab_mode:
+                im_lq = util_image.imresize_np(im_gt, scale=1/self.sf)
+            else:
+                im_lq = cv2.resize(im_gt, dsize=None, fx=1/self.sf, fy=1/self.sf, interpolation=cv2.INTER_CUBIC)
+            if self.resize_back:
+                if self.matlab_mode:
+                    im_lq = util_image.imresize_np(im_gt, scale=self.sf)
+                else:
+                    im_lq = cv2.resize(im_lq, dsize=None, fx=self.sf, fy=self.sf, interpolation=cv2.INTER_CUBIC)
+            im_lq = np.clip(im_lq, 0.0, 1.0)                
+
+            out = {'lq':self.transform(im_lq), 'gt':self.transform(im_gt_golden)} # [0, 1] to [-1, 1]
+
+        return out
+
+
+class RealESRGANMasterDataset_3d(IterableDataset):
+    def __init__(
+            self,
+            opt
+            ):
+
+
+        def _wrap_loader(loader):
+            while True: 
+                for batch in loader:
+                    yield batch
+        
+        
+        
+        self.opt = opt
+       
+        self.dataloaders = {}
+        self.bs = 1
+        self.nw = 0
+        self.dataset_type_li = ['realesrgan_cardiac_bowl_3d', 'realesrgan_SurgT']
+        for dataset_type in self.dataset_type_li:
+            if not(dataset_type in self.opt): continue
+            new_opt = {'type': dataset_type, 'params':{}}
+            for key in self.opt:
+                if key in self.dataset_type_li: continue
+                new_opt['params'][key] = self.opt[key]
+            new_opt['params']['txt_file_path'] = self.opt[dataset_type]['txt_file_path']
+            dataset = create_dataset(new_opt)
+            
+            self.dataloaders[dataset_type] = udata.DataLoader(dataset, batch_size=self.bs, num_workers=self.nw)
+    
+    def __iter__(self,):
+        iterators = {}
+        for dataset_type in self.dataset_type_li:
+            iterators[dataset_type] = iter(self.dataloaders[dataset_type])
+        while True:
+            dataset_sample_li = ['realesrgan_cardiac_bowl_3d'] * 6 + ['realesrgan_SurgT'] * 4
+            dataset_type = random.choice(dataset_sample_li)
+
+            try:
+                it = iterators[dataset_type]
+                yield next(it)
+            except StopIteration:
+                iterators = {}
+                for dataset_type in self.dataset_type_li:
+                    iterators[dataset_type] = iter(self.dataloaders[dataset_type])
+                it = iterators[dataset_type]
+                yield next(it)
+    
+            
+
+    def __len__(self):
+        return int(1e9)
+
+    '''
+
+    def __getitem__(self, index):
+        dataset_sample_li = ['realesrgan_cardiac_bowl_3d'] * 6 + ['realesrgan_SurgT'] * 4
+        dataset_type = random.choice(dataset_sample_li)
+        try:
+            sample = next(self.dataloaders[dataset_type])
+        except StopIteration:
+            self.dataloaders[dataset_type] = _wrap_loader(udata.DataLoader(dataset, batch_size=self.bs, num_workers=self.nw))
+            sample = next(self.dataloaders[dataset_type])
+        return sample
+        
+    '''

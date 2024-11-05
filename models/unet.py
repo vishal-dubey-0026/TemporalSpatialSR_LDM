@@ -876,6 +876,339 @@ class UNetModelSwin(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
 
+class UNetModelSwin_3d(nn.Module):
+    """
+    The full UNet model with attention and timestep embedding.
+    :param in_channels: channels in the input Tensor.
+    :param model_channels: base channel count for the model.
+    :param out_channels: channels in the output Tensor.
+    :param num_res_blocks: number of residual blocks per downsample.
+    :param attention_resolutions: a collection of downsample rates at which
+        attention will take place. May be a set, list, or tuple.
+        For example, if this contains 4, then at 4x downsampling, attention
+        will be used.
+    :param dropout: the dropout probability.
+    :param channel_mult: channel multiplier for each level of the UNet.
+    :param conv_resample: if True, use learned convolutions for upsampling and
+        downsampling.
+    :param dims: determines if the signal is 1D, 2D, or 3D.
+    :param num_classes: if specified (as an int), then this model will be
+        class-conditional with `num_classes` classes.
+    :param num_heads: the number of attention heads in each attention layer.
+    :param num_heads_channels: if specified, ignore num_heads and instead use
+                               a fixed channel width per attention head.
+    :param use_scale_shift_norm: use a FiLM-like conditioning mechanism.
+    :param resblock_updown: use residual blocks for up/downsampling.
+    :param use_new_attention_order: use a different attention pattern for potentially
+                                    increased efficiency.
+    :patch_norm: patch normalization in swin transformer
+    :swin_embed_norm: embed_dim in swin transformer
+    """
+
+    def __init__(
+        self,
+        image_size,
+        in_channels,
+        model_channels,
+        out_channels,
+        num_res_blocks,
+        attention_resolutions,
+        cond_lq=True,
+        dropout=0,
+        channel_mult=(1, 2, 4, 8),
+        conv_resample=True,
+        dims=2,
+        use_fp16=False,
+        num_heads=1,
+        num_head_channels=-1,
+        use_scale_shift_norm=False,
+        resblock_updown=False,
+        swin_depth=2,
+        swin_embed_dim=96,
+        window_size=8,
+        mlp_ratio=2.0,
+        patch_norm=False,
+    ):
+        super().__init__()
+
+        if isinstance(num_res_blocks, int):
+            num_res_blocks = [num_res_blocks,] * len(channel_mult)
+        else:
+            assert len(num_res_blocks) == len(channel_mult)
+        if num_heads == -1:
+            assert swin_embed_dim % num_head_channels == 0 and num_head_channels > 0
+        self.num_res_blocks = num_res_blocks
+
+        self.image_size = image_size
+        self.in_channels = in_channels
+        self.model_channels = model_channels
+        self.out_channels = out_channels
+        self.attention_resolutions = attention_resolutions
+        self.dropout = dropout
+        self.channel_mult = channel_mult
+        self.conv_resample = conv_resample
+        self.dtype = th.float16 if use_fp16 else th.float32
+        self.num_heads = num_heads
+        self.num_head_channels = num_head_channels
+        self.cond_lq = cond_lq
+
+        time_embed_dim = model_channels * 4
+        self.time_embed = nn.Sequential(
+            linear(model_channels, time_embed_dim),
+            nn.SiLU(),
+            linear(time_embed_dim, time_embed_dim),
+        )
+
+        ch = input_ch = int(channel_mult[0] * model_channels)
+        self.input_blocks = nn.ModuleList(
+            [TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))]
+        )
+        input_block_chans = [ch]
+        ds = image_size
+        for level, mult in enumerate(channel_mult):
+            for jj in range(num_res_blocks[level]):
+                layers = [
+                    ResBlock(
+                        ch,
+                        time_embed_dim,
+                        dropout,
+                        out_channels=int(mult * model_channels),
+                        dims=dims,
+                        use_scale_shift_norm=use_scale_shift_norm,
+                    )
+                ]
+                ch = int(mult * model_channels)
+                if ds in attention_resolutions and jj==0:
+                    layers.append(
+                        BasicLayer(
+                                in_chans=ch,
+                                embed_dim=swin_embed_dim,
+                                num_heads=num_heads if num_head_channels == -1 else swin_embed_dim // num_head_channels,
+                                window_size=window_size,
+                                depth=swin_depth,
+                                img_size=ds,
+                                patch_size=1,
+                                mlp_ratio=mlp_ratio,
+                                qkv_bias=True,
+                                qk_scale=None,
+                                drop=dropout,
+                                attn_drop=0.,
+                                drop_path=0.,
+                                use_checkpoint=False,
+                                norm_layer=normalization,
+                                patch_norm=patch_norm,
+                                 )
+                    )
+                self.input_blocks.append(TimestepEmbedSequential(*layers))
+                input_block_chans.append(ch)
+            if level != len(channel_mult) - 1:
+                out_ch = ch
+                self.input_blocks.append(
+                    TimestepEmbedSequential(
+                        ResBlock(
+                            ch,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=out_ch,
+                            dims=dims,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                            down=True,
+                        )
+                        if resblock_updown
+                        else Downsample(
+                            ch, conv_resample, dims=dims, out_channels=out_ch
+                        )
+                    )
+                )
+                ch = out_ch
+                input_block_chans.append(ch)
+                ds //= 2
+
+        self.middle_block = TimestepEmbedSequential(
+            ResBlock(
+                ch,
+                time_embed_dim,
+                dropout,
+                dims=dims,
+                use_scale_shift_norm=use_scale_shift_norm,
+            ),
+            BasicLayer(
+                    in_chans=ch,
+                    embed_dim=swin_embed_dim,
+                    num_heads=num_heads if num_head_channels == -1 else swin_embed_dim // num_head_channels,
+                    window_size=window_size,
+                    depth=swin_depth,
+                    img_size=ds,
+                    patch_size=1,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=True,
+                    qk_scale=None,
+                    drop=dropout,
+                    attn_drop=0.,
+                    drop_path=0.,
+                    use_checkpoint=False,
+                    norm_layer=normalization,
+                    patch_norm=patch_norm,
+                     ),
+            ResBlock(
+                ch,
+                time_embed_dim,
+                dropout,
+                dims=dims,
+                use_scale_shift_norm=use_scale_shift_norm,
+            ),
+        )
+        
+        self.fusion_block = TimestepEmbedSequential(
+           
+            BasicLayer(
+                    in_chans=ch*3,
+                    embed_dim=swin_embed_dim,
+                    num_heads=num_heads if num_head_channels == -1 else swin_embed_dim // num_head_channels,
+                    window_size=window_size,
+                    depth=1, #swin_depth,
+                    img_size=ds,
+                    patch_size=1,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=True,
+                    qk_scale=None,
+                    drop=dropout,
+                    attn_drop=0.,
+                    drop_path=0.,
+                    use_checkpoint=False,
+                    norm_layer=normalization,
+                    patch_norm=patch_norm,
+                     ),
+            ResBlock(
+                ch*3,
+                time_embed_dim,
+                dropout,
+                dims=dims,
+                use_scale_shift_norm=use_scale_shift_norm,
+                out_channels = ch
+            ),
+            
+        )
+        
+        self.output_blocks = nn.ModuleList([])
+        for level, mult in list(enumerate(channel_mult))[::-1]:
+            for i in range(num_res_blocks[level] + 1):
+                ich = input_block_chans.pop()
+                layers = [
+                    ResBlock(
+                        ch + ich,
+                        time_embed_dim,
+                        dropout,
+                        out_channels=int(model_channels * mult),
+                        dims=dims,
+                        use_scale_shift_norm=use_scale_shift_norm,
+                    )
+                ]
+                ch = int(model_channels * mult)
+                if ds in attention_resolutions and i==0:
+                    layers.append(
+                        BasicLayer(
+                                in_chans=ch,
+                                embed_dim=swin_embed_dim,
+                                num_heads=num_heads if num_head_channels == -1 else swin_embed_dim // num_head_channels,
+                                window_size=window_size,
+                                depth=swin_depth,
+                                img_size=ds,
+                                patch_size=1,
+                                mlp_ratio=mlp_ratio,
+                                qkv_bias=True,
+                                qk_scale=None,
+                                drop=dropout,
+                                attn_drop=0.,
+                                use_checkpoint=False,
+                                norm_layer=normalization,
+                                patch_norm=patch_norm,
+                                 )
+                    )
+                if level and i == num_res_blocks[level]:
+                    out_ch = ch
+                    layers.append(
+                        ResBlock(
+                            ch,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=out_ch,
+                            dims=dims,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                            up=True,
+                        )
+                        if resblock_updown
+                        else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)
+                    )
+                    ds *= 2
+                self.output_blocks.append(TimestepEmbedSequential(*layers))
+
+        self.out = nn.Sequential(
+            normalization(ch),
+            nn.SiLU(),
+            conv_nd(dims, input_ch, out_channels, 3, padding=1),
+        )
+
+    def forward(self, x, timesteps, lq=None):
+        """
+        Apply the model to an input batch.
+        :param x: an [N x C x ...] Tensor of inputs.
+        :param timesteps: a 1-D batch of timesteps.
+        :param lq: an [N x C x ...] Tensor of low quality iamge.
+        :return: an [N x C x ...] Tensor of outputs.
+        """
+        x_li = x
+        lqs = lq
+        hs, h_middle_block = [], []
+        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels)).type(self.dtype)
+        num_frames = len(x)
+        for cur_frame_idx in range(num_frames): #range(1, 2):
+            x = x_li[cur_frame_idx]
+            if lq is not None:
+                assert self.cond_lq
+                # print(lq.shape, x.shape)
+                lq = lqs[:, cur_frame_idx*num_frames: cur_frame_idx*num_frames + 3, :, :]
+                
+                if lq.shape[2:] != x.shape[2:]:
+                    if lq.shape[2]> x.shape[2]:
+                        lq = F.pixel_unshuffle(lq, 2)
+                    else:
+                        lq = F.interpolate(lq, scale_factor=4)
+                x = th.cat([x, lq], dim=1)
+
+            h = x.type(self.dtype)
+            for ii, module in enumerate(self.input_blocks):
+                h = module(h, emb)
+                if cur_frame_idx == 1:
+                    hs.append(h)
+            h = self.middle_block(h, emb)
+            h_middle_block.append(h)
+        ##### fusion block ###########
+        h = self.fusion_block(th.cat(h_middle_block, dim = 1), emb) # th.cat(h_middle_block, dim = 1)
+        ##############################
+        for module in self.output_blocks:
+            h = th.cat([h, hs.pop()], dim=1)
+            h = module(h, emb)
+        h = h.type(x.dtype)
+        out = self.out(h)
+        return out
+
+    def convert_to_fp16(self):
+        """
+        Convert the torso of the model to float16.
+        """
+        self.input_blocks.apply(convert_module_to_f16)
+        self.middle_block.apply(convert_module_to_f16)
+        self.output_blocks.apply(convert_module_to_f16)
+
+    def convert_to_fp32(self):
+        """
+        Convert the torso of the model to float32.
+        """
+        self.input_blocks.apply(convert_module_to_f32)
+        self.middle_block.apply(convert_module_to_f32)
+        self.output_blocks.apply(convert_module_to_f32)
+
 class ResBlockConv(TimestepBlock):
     """
     A residual block that can optionally change the number of channels.

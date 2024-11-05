@@ -2,6 +2,8 @@ import numpy as np
 import torch as th
 
 from .gaussian_diffusion import GaussianDiffusion, GaussianDiffusionDDPM
+from .gaussian_diffusion_3d import GaussianDiffusion as GaussianDiffusion_3d
+
 
 def space_timesteps(num_timesteps, sample_timesteps):
     """
@@ -32,6 +34,40 @@ class SpacedDiffusion(GaussianDiffusion):
         self.original_num_steps = len(kwargs["sqrt_etas"])
 
         base_diffusion = GaussianDiffusion(**kwargs)  # pylint: disable=missing-kwoa
+        new_sqrt_etas = []
+        for ii, etas_current in enumerate(base_diffusion.sqrt_etas):
+            if ii in self.use_timesteps:
+                new_sqrt_etas.append(etas_current)
+                self.timestep_map.append(ii)
+        kwargs["sqrt_etas"] = np.array(new_sqrt_etas)
+        super().__init__(**kwargs)
+
+    def p_mean_variance(self, model, *args, **kwargs):  # pylint: disable=signature-differs
+        return super().p_mean_variance(self._wrap_model(model), *args, **kwargs)
+
+    def training_losses(self, model, *args, **kwargs):  # pylint: disable=signature-differs
+        return super().training_losses(self._wrap_model(model), *args, **kwargs)
+
+    def _wrap_model(self, model):
+        if isinstance(model, _WrappedModel):
+            return model
+        return _WrappedModel(model, self.timestep_map, self.original_num_steps)
+
+class SpacedDiffusion_3d(GaussianDiffusion_3d):
+    """
+    A diffusion process which can skip steps in a base diffusion process.
+
+    :param use_timesteps: a collection (sequence or set) of timesteps from the
+                          original diffusion process to retain.
+    :param kwargs: the kwargs to create the base diffusion process.
+    """
+
+    def __init__(self, use_timesteps, **kwargs):
+        self.use_timesteps = set(use_timesteps)
+        self.timestep_map = []
+        self.original_num_steps = len(kwargs["sqrt_etas"])
+
+        base_diffusion = GaussianDiffusion_3d(**kwargs)  # pylint: disable=missing-kwoa
         new_sqrt_etas = []
         for ii, etas_current in enumerate(base_diffusion.sqrt_etas):
             if ii in self.use_timesteps:

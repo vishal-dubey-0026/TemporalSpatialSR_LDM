@@ -1,0 +1,5 @@
+traindata/second-annual-data-science-bowl-v2-3d/93_sax_56.txt
+traindata/second-annual-data-science-bowl-v2-3d/144_sax_42.txt
+traindata/second-annual-data-science-bowl-v2-3d/1098_sax_10.txt
+traindata/second-annual-data-science-bowl-v2-3d/1080_sax_13.txt
+traindata/second-annual-data-science-bowl-v2-3d/1001_sax_7.txt

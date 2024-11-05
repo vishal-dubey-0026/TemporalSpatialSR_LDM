@@ -128,6 +128,7 @@ class GaussianDiffusion:
         scale_factor=None,
         normalize_input=True,
         latent_flag=True,
+        seed = None,
     ):
         self.kappa = kappa
         self.model_mean_type = model_mean_type
@@ -136,6 +137,9 @@ class GaussianDiffusion:
         self.normalize_input = normalize_input
         self.latent_flag = latent_flag
         self.sf = sf
+
+        self.rng_generator = th.Generator(device = 'cuda')
+        self.rng_generator.manual_seed(1234567 if seed is None else seed)  # Set a master seed for reproducibility
 
         # Use float64 for accuracy.
         self.sqrt_etas = sqrt_etas
@@ -177,6 +181,9 @@ class GaussianDiffusion:
 
         # self.weight_loss_mse = np.append(weight_loss_mse[1],  weight_loss_mse[1:])
         self.weight_loss_mse = weight_loss_mse
+    
+    def custom_randn_like(self, input):
+        return th.randn(input.size(), dtype=input.dtype, layout=input.layout, device=input.device, generator = self.rng_generator)
 
     def q_mean_variance(self, x_start, y, t):
         """
@@ -192,6 +199,8 @@ class GaussianDiffusion:
         log_variance = variance.log()
         return mean, variance, log_variance
 
+   
+
     def q_sample(self, x_start, y, t, noise=None):
         """
         Diffuse the data for a given number of diffusion steps.
@@ -205,7 +214,7 @@ class GaussianDiffusion:
         :return: A noisy version of x_start.
         """
         if noise is None:
-            noise = th.randn_like(x_start)
+            noise = self.custom_randn_like(x_start)
         assert noise.shape == x_start.shape
         return (
             _extract_into_tensor(self.etas, t, x_start.shape) * (y - x_start) + x_start
@@ -406,7 +415,7 @@ class GaussianDiffusion:
             denoised_fn=denoised_fn,
             model_kwargs=model_kwargs,
         )
-        noise = th.randn_like(x)
+        noise = self.custom_randn_like(x)
         if noise_repeat:
             noise = noise[0,].repeat(x.shape[0], 1, 1, 1)
         nonzero_mask = (
@@ -641,7 +650,7 @@ class GaussianDiffusion:
 
         # generating noise
         if noise is None:
-            noise = th.randn_like(z_y)
+            noise = self.custom_randn_like(z_y)
         if noise_repeat:
             noise = noise[0,].repeat(z_y.shape[0], 1, 1, 1)
         z_sample = self.prior_sample(z_y, noise)
@@ -710,7 +719,7 @@ class GaussianDiffusion:
         :param noise: the [N x C x ...] tensor of degraded inputs.
         """
         if noise is None:
-            noise = th.randn_like(y)
+            noise = self.custom_randn_like(y)
 
         t = th.tensor([self.num_timesteps-1,] * y.shape[0], device=y.device).long()
 
@@ -743,7 +752,7 @@ class GaussianDiffusion:
             
         z_y = self.encode_first_stage(y, first_stage_model, up_sample=True) # TODO can be eliminated to speed up, since z_y is already obtained in self.ddim_sample_loop/p_sample_loop
         if noise is None:
-            noise = th.randn_like(z_y)
+            noise = self.custom_randn_like(z_y)
         
         terms = {}
         loss_type = "mse" # "mse"
@@ -768,7 +777,7 @@ class GaussianDiffusion:
                         # first_stage_model.eval()
                         model_output_aux_list = []
                         for _ in range(uncertainty_num_aux):
-                            z_t_aux = self.q_sample(z_start_teacher, z_y, t, noise=th.randn_like(z_y))
+                            z_t_aux = self.q_sample(z_start_teacher, z_y, t, noise=self.custom_randn_like(z_y))
                             model_output_aux_list.append(model(self._scale_input(z_t_aux, t), t, **model_kwargs))
                         model_output_aux = th.stack(model_output_aux_list, dim=0)
                         uncertainty = (model_output_aux.max(dim=0)[0]-model_output_aux.min(dim=0)[0]) # B*C*H*W
@@ -901,12 +910,12 @@ class GaussianDiffusion:
         """
         if model_kwargs is None:
             model_kwargs = {}
-
+        
         z_y = self.encode_first_stage(y, first_stage_model, up_sample=True)
         z_start = self.encode_first_stage(x_start, first_stage_model, up_sample=False)
 
         if noise is None:
-            noise = th.randn_like(z_start)
+            noise = self.custom_randn_like(z_start)
 
         z_t = self.q_sample(z_start, z_y, t, noise=noise)
 

@@ -82,7 +82,7 @@ def measure_time(net, inputs, num_forward=100):
 
     return start.elapsed_time(end) / 1000
 
-def reload_model(model, ckpt):
+def reload_model(model, ckpt, strict = True):
     if list(model.state_dict().keys())[0].startswith('module.'):
         if list(ckpt.keys())[0].startswith('module.'):
             ckpt = ckpt
@@ -93,4 +93,4 @@ def reload_model(model, ckpt):
             ckpt = OrderedDict({key[7:]:value for key, value in ckpt.items()})
         else:
             ckpt = ckpt
-    model.load_state_dict(ckpt)
+    model.load_state_dict(ckpt, strict = strict)

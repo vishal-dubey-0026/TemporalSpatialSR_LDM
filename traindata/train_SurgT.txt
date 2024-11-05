@@ -1,0 +1,9 @@
+SurgT/train/case_1
+SurgT/train/case_2
+SurgT/train/case_3
+SurgT/train/case_4
+SurgT/train/case_5
+SurgT/train/case_6
+SurgT/train/case_7
+SurgT/train/case_8
+SurgT/train/case_9
